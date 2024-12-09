@@ -1,0 +1,41 @@
+[project]
+name = "letsearch-client"
+version = "0.1.1"
+keywords = ["letsearch", "rag", "vectordb", "onnx"]
+authors = [
+    { name = "Yusuf Sarıgöz", email = "yusufsarigoz@gmail.com"}
+]
+description = "Python client for letsearch, RAG-native vector DB in a single binary to embed, index and serve your documents for search"
+readme = "README.md"
+requires-python = ">=3.10"
+classifiers = [
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+dependencies = [
+    "httpx>=0.28.1",
+    "pydantic>=2.10.3",
+]
+
+[project.urls]
+homepage = "https://github.com/monatis/letsearch"
+project = "https://github.com/monatis/letsearch"
+repository = "https://github.com/monatis/letsearch-client"
+
+
+[project.optional-dependencies]
+conversion = [
+    "torch>=2.5.1",
+    "torchvision",
+    "onnx",
+    "onnxruntime",
+    "transformers",
+    "pytest>=8.3.4",
+]
+
+[project.entry-points.console_scripts]
+letsearch-convert = "letsearch_client.export_to_onnx:main"
