@@ -1,5 +1,7 @@
 # letsearch-client
 
+![logo](./assets/logo.jpg)
+
 A Python client for [letsearch](https://github.com/monatis/letsearch) — the vector DB so easy, even your grandparents can build a RAG system 😁.
 
 ## ❓ What is this?
