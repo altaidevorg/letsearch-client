@@ -8,7 +8,7 @@ The `letsearch-client` project provides a Python client library (`LetsearchClien
 In addition to the client library, the project includes essential *tooling* (`export_to_onnx.py`) for preparing sentence embedding models for deployment within the Letsearch backend. This tooling handles the conversion of Hugging Face Transformer models to the **ONNX** format for portability and optimized inference. It further incorporates a **model quantization** workflow (FP16, INT8) using `onnxruntime` to significantly reduce model size and potentially accelerate inference, addressing common challenges in deploying large ML models efficiently. The project thus provides both the means to *interact* with a Letsearch instance and the tools to *prepare* the necessary AI models for it.
 
 
-**Source Repository:** [https://github.com/monatis/letsearch-client.git](https://github.com/monatis/letsearch-client.git)
+**Source Repository:** [https://github.com/monatis/letsearch-client.git](https://github.com/altaidevorg/letsearch-client.git)
 
 ```mermaid
 flowchart TD
