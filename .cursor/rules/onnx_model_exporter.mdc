@@ -1,0 +1,223 @@
+---
+description: Tutorial on the ONNX Model Exporter script in letsearch-client for converting Hugging Face sentence transformers to ONNX.
+globs: letsearch_client/export_to_onnx.py
+alwaysApply: false
+---
+# Chapter 4: ONNX Model Exporter
+
+In the previous chapter, [HTTP Request Abstraction (`_request`)](http_request_abstraction____request__.mdc), we examined the internal mechanism for handling API communication within the `LetsearchClient`. Now, we shift focus to a crucial utility provided within the `letsearch-client` project: the ONNX Model Exporter script (`export_to_onnx.py`). This script addresses the need to prepare machine learning models for efficient deployment.
+
+## Motivation and Use Case
+
+**Problem:** State-of-the-art sentence embedding models are often developed and fine-tuned using frameworks like PyTorch (via Hugging Face Transformers). However, deploying these models directly in production environments, especially those emphasizing performance, cross-platform compatibility, or specific hardware acceleration (like the Letsearch backend), can be challenging. PyTorch models might have dependencies or performance characteristics not ideal for pure inference tasks.
+
+**Solution:** The `export_to_onnx.py` script converts Hugging Face Transformer models (specifically those suitable for sentence embeddings) into the **ONNX (Open Neural Network Exchange)** format. ONNX provides a standardized, interoperable format for machine learning models. Exporting to ONNX:
+*   **Decouples** the model from the original training framework (PyTorch).
+*   Enables **optimization** using various ONNX runtimes (like ONNX Runtime).
+*   Facilitates **portability** across different hardware (CPU, GPU, specialized accelerators) and software platforms (Python, C++, C#, Java).
+*   Creates model artifacts ready for consumption by inference engines like the one likely used by the Letsearch backend.
+
+**Central Use Case:** Imagine you have fine-tuned a sentence transformer model (e.g., `sentence-transformers/all-MiniLM-L6-v2`) using PyTorch and Hugging Face libraries. To use this model within the Letsearch ecosystem for generating embeddings, you need to convert it into the ONNX format. The `export_to_onnx.py` script automates this conversion process, generating the necessary ONNX model file(s) along with required tokenizer configuration and metadata.
+
+## Key Concepts
+
+The script orchestrates several steps to achieve the conversion:
+
+1.  **Loading Model & Tokenizer:** It uses the `transformers` library (`AutoModel`, `AutoTokenizer`) to load the specified pre-trained PyTorch model and its corresponding tokenizer from a Hugging Face model identifier or a local path.
+2.  **Dummy Input Generation:** ONNX export requires tracing the model's execution path. This is done by providing a sample input (`dummy_model_input`) that reflects the expected input structure (e.g., `input_ids`, `attention_mask`).
+3.  **ONNX Export (`torch.onnx.export`)**: This is the core function call. It traces the model with the dummy input and converts the PyTorch operations into an ONNX graph definition.
+4.  **Dynamic Axes Configuration:** Crucially, it configures dynamic axes for inputs and outputs. This tells the ONNX runtime that certain dimensions (like batch size and sequence length) are not fixed, allowing the exported model to handle inputs of varying sizes during inference, which is essential for real-world use.
+5.  **Artifact Generation:** The script saves:
+    *   The exported ONNX model(s) (in FP32 format, and optionally FP16 and INT8 quantized versions).
+    *   The tokenizer configuration files (necessary for preprocessing text before feeding it to the model).
+    *   A `metadata.json` file describing the model origin, variants, and structure expected by Letsearch.
+    *   A basic `README.md` file.
+
+## Using the Exporter Script
+
+The exporter is a command-line tool driven by `argparse`.
+
+**Command-Line Interface:**
+
+```bash
+python -m letsearch_client.export_to_onnx -m <model_name_or_path> -o <output_directory> [-d <description>]
+```
+
+*   `-m` or `--model` (Required): Specifies the Hugging Face model identifier (e.g., `sentence-transformers/all-MiniLM-L6-v2`) or the path to a local directory containing a saved model.
+*   `-o` or `--output` (Required): Specifies the directory where the exported ONNX model, tokenizer files, and metadata will be saved.
+*   `-d` or `--description` (Optional): A short description to include in the generated `metadata.json`.
+
+**Example Usage:**
+
+Let's export the `sentence-transformers/all-MiniLM-L6-v2` model to a directory named `exported_minilm`:
+
+```bash
+# Ensure you have the necessary dependencies:
+# pip install letsearch-client[conversion]
+
+python -m letsearch_client.export_to_onnx \
+    -m sentence-transformers/all-MiniLM-L6-v2 \
+    -o ./exported_minilm \
+    -d "Exported all-MiniLM-L6-v2 for Letsearch"
+```
+
+**Expected Output (in `./exported_minilm` directory):**
+
+*   `model-f32.onnx`: The model exported in standard 32-bit floating-point precision.
+*   `model-f16.onnx`: The model converted to 16-bit floating-point precision (half-precision).
+*   `model-i8.onnx`: The model dynamically quantized to 8-bit integers (using ONNX Runtime quantization tools).
+*   `tokenizer.json`, `vocab.txt`, `special_tokens_map.json`, `tokenizer_config.json`, etc.: Files required to reconstruct the tokenizer.
+*   `metadata.json`: Contains information about the conversion and model variants.
+*   `README.md`: A basic readme file.
+
+This `exported_minilm` directory now contains a self-contained package ready to be used by an ONNX-compatible system like the Letsearch backend.
+
+## Internal Implementation
+
+**High-Level Flow:**
+
+When the script is executed:
+1.  It parses the command-line arguments (`-m`, `-o`, `-d`).
+2.  It uses `AutoTokenizer.from_pretrained` to load the tokenizer specified by `-m`.
+3.  It saves the tokenizer files to the output directory (`-o`) using `tokenizer.save_pretrained`.
+4.  It uses `AutoModel.from_pretrained` to load the corresponding PyTorch model. The model is moved to the appropriate device (GPU if available, otherwise CPU) and set to evaluation mode (`model.eval()`).
+5.  It creates a dummy input tensor using the loaded tokenizer (e.g., `tokenizer("Sample text", return_tensors="pt")`).
+6.  It defines the input names (e.g., `input_ids`, `attention_mask`) and configures dynamic axes for batch size and sequence length on these inputs and the expected outputs (`last_hidden_state`, `pooler_output`).
+7.  It calls `torch.onnx.export` with the model, dummy input, output path (`model-f32.onnx`), input/output names, dynamic axes configuration, and other options (like `opset_version`). This generates the initial FP32 ONNX model.
+8.  *Optional Quantization Steps (FP16, INT8):*
+    *   Converts the PyTorch model to half-precision (`model.half()`) and exports again to create `model-f16.onnx`.
+    *   Uses `onnxruntime.quantization` tools (`quant_pre_process`, `quantize_dynamic`) on the FP32 model to create the dynamically quantized `model-i8.onnx`.
+9.  It constructs a `metadata` dictionary containing details about the conversion, description, and paths to the generated ONNX variants (`f32`, `f16`, `i8`).
+10. It saves the `metadata` dictionary as `metadata.json` in the output directory.
+11. It saves a standard `README.md` file.
+
+**Sequence Diagram (Simplified):**
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant Script as export_to_onnx.py
+    participant HF_Lib as Hugging Face Libs
+    participant PyTorch
+    participant ONNX_Lib as ONNX/ONNX Runtime Libs
+    participant FileSystem
+
+    User->>+Script: Execute with args (-m, -o, -d)
+    Script->>+HF_Lib: AutoTokenizer.from_pretrained(model_path)
+    HF_Lib-->>-Script: Tokenizer object
+    Script->>+FileSystem: Save tokenizer files (tokenizer.save_pretrained)
+    Script->>+HF_Lib: AutoModel.from_pretrained(model_path)
+    HF_Lib-->>-Script: PyTorch Model object
+    Script->>HF_Lib: Tokenize dummy text
+    HF_Lib-->>Script: Dummy Input Tensors
+    Script->>+PyTorch: torch.onnx.export(model, dummy_input, path, ...)
+    PyTorch-->>-Script: Exports ONNX graph
+    Script->>+FileSystem: Save model-f32.onnx
+    Script->>+ONNX_Lib: Quantize model (FP16/INT8)
+    ONNX_Lib-->>-Script: Quantization done
+    Script->>+FileSystem: Save model-f16.onnx, model-i8.onnx
+    Script->>Script: Create metadata dict
+    Script->>+FileSystem: Save metadata.json
+    Script->>+FileSystem: Save README.md
+    Script-->>-User: Process finished
+```
+
+**Code Snippets:**
+
+1.  **Loading Model and Tokenizer:**
+    ```python
+    # letsearch_client/export_to_onnx.py
+    from transformers import AutoTokenizer, AutoModel
+    import torch
+
+    # ... argparse logic ...
+    model_path = args.model
+    output_path = args.output
+
+    tokenizer = AutoTokenizer.from_pretrained(model_path)
+    # Save tokenizer files immediately
+    tokenizer.save_pretrained(output_path)
+
+    device = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
+    model = AutoModel.from_pretrained(model_path)
+    model.to(device)
+    model.eval() # Set model to evaluation mode
+    ```
+    This section handles loading the necessary components using Hugging Face libraries and preparing the model for export.
+
+2.  **Preparing for Export (Dummy Input, Dynamic Axes):**
+    ```python
+    # letsearch_client/export_to_onnx.py
+    # Create sample input
+    dummy_model_input = tokenizer(
+        "Using BERT with ONNX Runtime!", return_tensors="pt"
+    ).to(device)
+    inputs = tuple(dummy_model_input.values())
+    input_names = tuple(dummy_model_input.keys()) # e.g., ('input_ids', 'attention_mask')
+
+    # Define dynamic axes for variable batch and sequence lengths
+    dynamic_axes = {
+        input_name: {0: "batch_size", 1: "sequence"} for input_name in input_names
+    }
+    dynamic_axes["last_hidden_state"] = {0: "batch_size", 1: "sequence"}
+    # Add other outputs if necessary, like pooler_output
+    dynamic_axes["pooler_output"] = {0: "batch_size"} # Example: Pooler output is fixed per item in batch
+    ```
+    Here, a sample input is created, and the crucial `dynamic_axes` dictionary is defined to allow flexibility in the exported model.
+
+3.  **Core ONNX Export Call (FP32):**
+    ```python
+    # letsearch_client/export_to_onnx.py
+    import torch
+
+    onnx_path = f"{output_path}/model-f32.onnx"
+    output_names = ("last_hidden_state", "pooler_output") # Define expected output names
+
+    torch.onnx.export(
+        model,                     # PyTorch model
+        inputs,                    # Dummy input tuple
+        onnx_path,                 # Output file path
+        input_names=input_names,       # Names for inputs
+        output_names=output_names,     # Names for outputs
+        dynamic_axes=dynamic_axes,   # Configuration for variable dimensions
+        do_constant_folding=True,  # Optimization
+        opset_version=14,          # ONNX operational set version
+        # ... other options ...
+    )
+    print(f"saved f32 model to {onnx_path}")
+    ```
+    This is the central command that performs the conversion using PyTorch's built-in ONNX exporter.
+
+4.  **Saving Metadata:**
+    ```python
+    # letsearch_client/export_to_onnx.py
+    import json
+
+    metadata = {
+        "letsearch_version": 1,
+        "converted_from": model_path, # Original model source
+        "description": args.description,
+        "variants": [ # List available ONNX model files
+            {"variant": "f32", "path": "model-f32.onnx"},
+            {"variant": "f16", "path": "model-f16.onnx"},
+            {"variant": "i8", "path": "model-i8.onnx"},
+        ],
+    }
+
+    with open(f"{output_path}/metadata.json", "w") as f:
+        f.write(json.dumps(metadata, indent=2)) # Pretty print JSON
+    ```
+    This step creates and saves the `metadata.json` file, which is likely consumed by the Letsearch backend to understand the exported model package.
+
+## Conclusion
+
+You now understand the purpose and function of the `export_to_onnx.py` script. It acts as a vital bridge, converting PyTorch-based sentence transformer models from the Hugging Face ecosystem into the portable and optimized ONNX format. You learned how to use the script via its command-line interface and saw the key steps involved internally: loading the model/tokenizer, configuring dynamic axes, invoking `torch.onnx.export`, and packaging the resulting ONNX models with necessary tokenizer files and metadata. This process prepares models for efficient inference deployment, presumably within the Letsearch backend.
+
+The script also performs quantization (FP16, INT8), which is a technique for further optimizing model size and inference speed.
+
+**Next:** We will delve deeper into the specific techniques and workflow involved in model optimization in [Model Quantization Workflow](model_quantization_workflow.mdc).
+
+
+---
+
+Generated by [Rules for AI](https://github.com/altaidevorg/rules-for-ai)

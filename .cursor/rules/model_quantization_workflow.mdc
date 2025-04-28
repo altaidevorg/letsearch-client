@@ -1,0 +1,210 @@
+---
+description: Explains the model quantization workflow integrated into the export_to_onnx.py script within letsearch-client, covering FP16 and INT8 dynamic quantization using onnxruntime.
+globs: letsearch_client/export_to_onnx.py
+alwaysApply: false
+---
+# Chapter 5: Model Quantization Workflow
+
+In [Chapter 4: ONNX Model Exporter](onnx_model_exporter.mdc), we discussed how the `export_to_onnx.py` script converts Hugging Face sentence transformers into the standard ONNX FP32 format. This chapter delves into the subsequent optimization steps performed *within the same script*: the **Model Quantization Workflow**. This workflow automatically generates lower-precision versions (FP16 and INT8) of the ONNX model.
+
+## Motivation: Optimizing for Deployment
+
+**Problem:** While ONNX provides a standard format, the default FP32 (32-bit floating-point) models, as exported in Chapter 4, can still pose challenges:
+*   **Size:** FP32 models can consume significant disk space and memory, especially large transformer models.
+*   **Inference Speed:** While faster than native PyTorch in some runtimes, FP32 inference might not meet the latency or throughput requirements for demanding applications or resource-constrained environments.
+*   **Hardware Utilization:** Many modern CPUs and GPUs offer specialized instructions for faster computation using lower-precision numbers (like FP16 or INT8), which FP32 models cannot leverage.
+
+**Solution:** **Quantization** is a technique used to reduce the numerical precision required to represent a model's weights and, potentially, its activations. By converting from FP32 to formats like FP16 (16-bit float) or INT8 (8-bit integer), we can achieve:
+*   **Reduced Model Size:** Lower precision means fewer bits per number, leading to significantly smaller model files.
+*   **Faster Inference:** Computations with lower-precision numbers can be faster, especially on hardware with dedicated support (e.g., NVIDIA Tensor Cores for FP16/INT8, specific CPU instructions).
+*   **Lower Memory Consumption:** Less memory is needed to load and run the model.
+
+The trade-off is a potential minor reduction in model accuracy, which needs to be evaluated for the specific use case. The quantization workflow within `export_to_onnx.py` automates the generation of these optimized variants.
+
+**Central Use Case:** After successfully exporting `sentence-transformers/all-MiniLM-L6-v2` to `model-f32.onnx` using `export_to_onnx.py` (as in Chapter 4), the *same execution* of the script automatically proceeds to generate `model-f16.onnx` and `model-i8.onnx`. This provides optimized alternatives alongside the original FP32 model, allowing the Letsearch deployment environment to choose the best variant based on available hardware and performance/accuracy requirements, all managed through the `metadata.json` file.
+
+## Key Concepts
+
+The workflow utilizes two main quantization techniques integrated into the export script:
+
+1.  **FP16 (Half Precision) Conversion:**
+    *   **What it is:** Reduces precision from 32-bit floats to 16-bit floats.
+    *   **How it's done:** The script leverages PyTorch's built-in capability. It converts the loaded PyTorch model to half-precision (`model.half()`) *before* calling `torch.onnx.export` a second time.
+    *   **Benefits:** Roughly halves the model size. Can significantly speed up inference on GPUs that efficiently support FP16 computations (e.g., NVIDIA GPUs with Tensor Cores). Accuracy loss is often negligible for many models.
+
+2.  **INT8 (8-bit Integer) Dynamic Quantization:**
+    *   **What it is:** Maps the ranges of floating-point weights (and sometimes activations) to 8-bit integers. "Dynamic" means that the model weights are quantized offline (during the export process), but the activations (intermediate calculation results) are quantized on-the-fly during inference.
+    *   **How it's done:** The script uses tools from the `onnxruntime.quantization` library.
+        *   `quant_pre_process`: Performs graph optimizations and transformations on the FP32 ONNX model to prepare it for quantization. This step is often necessary for compatibility and efficiency.
+        *   `quantize_dynamic`: Takes the pre-processed FP32 model and applies dynamic quantization, converting weights to INT8 format.
+    *   **Benefits:** Can reduce model size by up to 4x compared to FP32. Often provides significant speedups on CPUs, as integer operations are generally faster than floating-point operations. Can also benefit specialized hardware accelerators (NPUs). Accuracy impact varies but is often acceptable for many tasks.
+
+## Using the Quantization Workflow (Integrated in `export_to_onnx.py`)
+
+There are no separate commands to run the quantization workflow. It is automatically triggered as part of the main `export_to_onnx.py` script execution described in [Chapter 4: ONNX Model Exporter](onnx_model_exporter.mdc).
+
+When you run:
+```bash
+python -m letsearch_client.export_to_onnx \
+    -m sentence-transformers/all-MiniLM-L6-v2 \
+    -o ./exported_minilm
+```
+The script will *first* create `model-f32.onnx`, and *then* automatically perform the steps to create `model-f16.onnx` and `model-i8.onnx` in the same output directory (`./exported_minilm`).
+
+**Output Artifacts:**
+
+The `./exported_minilm` directory will contain:
+*   `model-f32.onnx`: Standard 32-bit float model.
+*   `model-f16.onnx`: **Generated by the FP16 quantization step.**
+*   `model-i8.onnx`: **Generated by the INT8 dynamic quantization step.**
+*   `tokenizer.*`, `metadata.json`, `README.md`: Other supporting files.
+
+The `metadata.json` file is updated to list these quantized variants, making them discoverable:
+
+```json
+// Example content of metadata.json
+{
+  "letsearch_version": 1,
+  "converted_from": "sentence-transformers/all-MiniLM-L6-v2",
+  "description": "...",
+  "variants": [
+    {"variant": "f32", "path": "model-f32.onnx"},
+    {"variant": "f16", "path": "model-f16.onnx"}, // FP16 variant listed
+    {"variant": "i8", "path": "model-i8.onnx"}   // INT8 variant listed
+  ]
+}
+```
+
+## Internal Implementation
+
+The quantization steps are sequenced within the `main` function of `export_to_onnx.py` after the initial FP32 export.
+
+**Step-by-Step Flow:**
+
+1.  **FP32 Export:** The script first performs the FP32 export using `torch.onnx.export`, saving `model-f32.onnx` (as detailed in Chapter 4).
+2.  **FP16 Quantization:**
+    *   The original PyTorch `model` object is converted to half-precision in-place: `model.half()`.
+    *   `torch.onnx.export` is called *again*, using the same parameters (dummy inputs, dynamic axes) but with the now half-precision model and targeting the `model-f16.onnx` output path.
+3.  **INT8 Quantization Pre-processing:**
+    *   The `onnxruntime.quantization.quant_pre_process` function is called. It takes the path to the FP32 ONNX model (`model-f32.onnx`) and an intermediate output path (e.g., `model-infer.onnx`). This step optimizes the ONNX graph for quantization.
+4.  **INT8 Dynamic Quantization:**
+    *   The `onnxruntime.quantization.quantize_dynamic` function is called.
+    *   It takes the path to the pre-processed model (`model-infer.onnx`) as input.
+    *   It specifies the target output path (`model-i8.onnx`).
+    *   It sets `weight_type=QuantType.QInt8` to perform INT8 quantization for weights.
+5.  **Metadata Update:** The `metadata` dictionary is constructed, explicitly including entries for `f32`, `f16`, and `i8` variants with their corresponding file paths (`model-f32.onnx`, `model-f16.onnx`, `model-i8.onnx`). This dictionary is then saved as `metadata.json`.
+
+**Sequence Diagram (Quantization Steps):**
+
+```mermaid
+sequenceDiagram
+    participant Script as export_to_onnx.py
+    participant PyTorch
+    participant FileSystem
+    participant ORT_Quant as onnxruntime.quantization
+
+    Script->>PyTorch: Export FP32 model... (Covered in Ch4)
+    Script->>FileSystem: Save model-f32.onnx
+
+    Note over Script: FP16 Quantization
+    Script->>PyTorch: model.half() # Convert model to FP16
+    Script->>PyTorch: torch.onnx.export(...) # Export FP16 model
+    Script->>FileSystem: Save model-f16.onnx
+
+    Note over Script: INT8 Quantization
+    Script->>ORT_Quant: quant_pre_process(f32_path, infer_path)
+    ORT_Quant-->>Script: Preprocessing done
+    Script->>FileSystem: Save model-infer.onnx (intermediate)
+    Script->>ORT_Quant: quantize_dynamic(infer_path, i8_path, QuantType.QInt8)
+    ORT_Quant-->>Script: Dynamic quantization done
+    Script->>FileSystem: Save model-i8.onnx
+
+    Note over Script: Finalize Metadata
+    Script->>Script: Build metadata dict including f32, f16, i8 variants
+    Script->>FileSystem: Save metadata.json
+```
+
+**Code Snippets:**
+
+1.  **FP16 Export:**
+    ```python
+    # letsearch_client/export_to_onnx.py
+    # (After FP32 export...)
+
+    onnx_f16_path = f"{output_path}/model-f16.onnx"
+
+    # Convert the PyTorch model to half precision
+    model.half()
+
+    # Export the half-precision model to ONNX
+    torch.onnx.export(
+        model,
+        inputs, # Same dummy inputs
+        onnx_f16_path, # Output path for FP16 model
+        input_names=input_names,
+        output_names=("last_hidden_state", "pooler_output"),
+        dynamic_axes=dynamic_axes,
+        do_constant_folding=True,
+        opset_version=14,
+        # ... other args ...
+    )
+    print(f"Saved f16 model to {onnx_f16_path}")
+    ```
+    This snippet shows converting the existing PyTorch model to `.half()` and then re-running the export process targeting the FP16 ONNX file.
+
+2.  **INT8 Dynamic Quantization:**
+    ```python
+    # letsearch_client/export_to_onnx.py
+    from onnxruntime.quantization import quantize_dynamic, QuantType, quant_pre_process
+
+    # (After FP32 and FP16 export...)
+    onnx_path = f"{output_path}/model-f32.onnx" # Input FP32 model
+    onnx_infer_path = f"{output_path}/model-infer.onnx" # Intermediate preprocessed
+    onnx_int8_path = f"{output_path}/model-i8.onnx" # Final INT8 model
+
+    # Pre-process the FP32 model for quantization
+    quant_pre_process(onnx_path, onnx_infer_path, auto_merge=True)
+
+    # Perform dynamic quantization (weights to INT8)
+    quantize_dynamic(
+        model_input=onnx_infer_path,  # Input: preprocessed FP32 model
+        model_output=onnx_int8_path, # Output: INT8 model path
+        weight_type=QuantType.QInt8, # Specify INT8 quantization
+    )
+    print(f"Saved i8 model to {onnx_int8_path}")
+    ```
+    This demonstrates the use of `onnxruntime.quantization` functions `quant_pre_process` and `quantize_dynamic` to generate the INT8 model from the FP32 version.
+
+3.  **Updating Metadata:**
+    ```python
+    # letsearch_client/export_to_onnx.py
+    import json
+
+    # (After all exports and quantization...)
+    metadata = {
+        "letsearch_version": 1,
+        "converted_from": model_path,
+        "description": args.description,
+        # Crucially includes all generated variants
+        "variants": [
+            {"variant": "f32", "path": "model-f32.onnx"},
+            {"variant": "f16", "path": "model-f16.onnx"},
+            {"variant": "i8", "path": "model-i8.onnx"},
+        ],
+    }
+
+    with open(f"{output_path}/metadata.json", "w") as f:
+        f.write(json.dumps(metadata)) # Save the complete metadata
+    ```
+    This shows the final `metadata` dictionary structure which includes references to all generated model precision variants (FP32, FP16, INT8).
+
+## Conclusion
+
+You have now learned about the model quantization workflow seamlessly integrated within the `letsearch-client`'s `export_to_onnx.py` script. This workflow enhances the ONNX export process by automatically generating optimized FP16 and INT8 (dynamic) versions of the original FP32 model. We explored the motivation (reduced size, faster inference), the key concepts (FP16 conversion via `.half()`, INT8 dynamic quantization via `onnxruntime.quantization`), and how the script orchestrates these steps internally using `torch.onnx.export`, `quant_pre_process`, and `quantize_dynamic`. The resulting `model-f16.onnx` and `model-i8.onnx` files, cataloged in `metadata.json`, provide optimized model options ready for deployment within performance-sensitive systems like Letsearch.
+
+This concludes the current series of tutorials on the `letsearch-client` project, covering the main client class, data models, internal request handling, ONNX export, and quantization.
+
+
+---
+
+Generated by [Rules for AI](https://github.com/altaidevorg/rules-for-ai)

@@ -1,0 +1,223 @@
+---
+description: Details the Pydantic models used as Data Transfer Objects (DTOs) in letsearch-client for validating API responses.
+globs: letsearch_client/types.py
+alwaysApply: false
+---
+# Chapter 2: API Data Models (Pydantic Types)
+
+In [Chapter 1: LetsearchClient](letsearchclient.mdc), we saw how the `LetsearchClient` provides methods like `healthcheck()`, `get_collections()`, and `search()` to interact with the Letsearch API. These methods return structured data. This chapter delves into how that structure is defined and enforced using Pydantic models, which serve as the **Data Transfer Objects (DTOs)** for our client.
+
+## Motivation: Why Define Data Structures?
+
+**Problem:** When receiving data from an API (typically as JSON), it arrives as a raw dictionary or list. Relying directly on this raw data is risky:
+*   **Unexpected Structure:** The API might change, returning data with missing keys, extra keys, or incorrect data types (e.g., a number as a string). This can lead to `KeyError` or `TypeError` exceptions at runtime.
+*   **Ambiguity:** Without a formal definition, it's unclear exactly what fields *should* be present and their types. This makes the code harder to understand and maintain.
+*   **Lack of Tooling:** IDEs cannot provide accurate autocompletion or type checking for raw dictionaries.
+
+**Solution:** The `letsearch-client` uses **Pydantic `BaseModel`** classes to define the expected structure of API responses. These models act as a formal **API contract** on the client side. Pydantic automatically validates incoming data against these models, ensuring it conforms to the expected schema *before* your application code uses it. This catches errors early, improves code clarity, and enables better developer tooling.
+
+**Central Use Case:** When you call `client.search(...)`, you expect a list of search results, each having specific fields like a document ID, content, and a relevance score. Instead of hoping the received dictionary has keys like `"results"`, `"id"`, `"content"`, and `"score"`, Pydantic models (`SearchResponse`, `SearchResult`) guarantee this structure and the types of these fields (e.g., `score` must be a float).
+
+## Core Concept: Pydantic `BaseModel`
+
+All data models in `letsearch_client/types.py` inherit from `pydantic.BaseModel`. This provides:
+*   **Type Hinting:** Define fields with standard Python type hints (e.g., `str`, `int`, `float`, `List[str]`).
+*   **Runtime Validation:** When data is passed to a model's initializer or `model_validate()` method, Pydantic automatically checks if the data conforms to the defined fields and types. It raises a `ValidationError` if not.
+*   **Data Parsing/Serialization:** Pydantic handles parsing JSON-like dictionaries into model instances and can serialize model instances back into dictionaries or JSON.
+
+## Key Data Models in `letsearch-client`
+
+Let's examine the specific Pydantic models used for different API responses. These are defined in `letsearch_client/types.py`.
+
+### 1. `ErrorResponse`
+
+Used when the API returns an error (and `raise_for_status=False` in `LetsearchClient`, or for specific non-HTTP errors).
+
+```python
+# letsearch_client/types.py
+from pydantic import BaseModel
+# ... other imports ...
+
+class ErrorResponse(BaseModel):
+    status: str = "error" # Default value for status
+    message: str         # The error message from the server
+```
+*   **Purpose:** Represents a standardized error structure.
+*   **Fields:**
+    *   `status`: Always "error".
+    *   `message`: A string describing the error.
+*   **Usage:** Returned by `LetsearchClient` methods instead of raising `HTTPStatusError` if `raise_for_status` is set to `False`.
+
+### 2. `HealthcheckResponse`
+
+The expected response from the `healthcheck()` method.
+
+```python
+# letsearch_client/types.py
+class HealthcheckResponse(BaseModel):
+    version: str # Letsearch server version
+    status: str  # Server status (e.g., "ok")
+```
+*   **Purpose:** Confirms the server is running and provides its version.
+*   **Fields:**
+    *   `version`: The version string of the Letsearch instance.
+    *   `status`: A status indicator, typically "ok".
+*   **Example Validation:**
+  ```python
+  # Assume raw_data = {"version": "0.1.0", "status": "ok"}
+  # In LetsearchClient.healthcheck():
+  health_info = HealthcheckResponse.model_validate(raw_data)
+  # health_info is now a HealthcheckResponse instance
+  print(health_info.version) # Output: 0.1.0
+  ```
+
+### 3. `CollectionInfo`
+
+Represents metadata about a single collection. Used within `CollectionsResponse` and as the direct return type of `get_collection()`.
+
+```python
+# letsearch_client/types.py
+from typing import List, Dict, Any
+
+class ColumnInfo(BaseModel): # Added for completeness based on Chapter 1 example output
+    indexed: bool
+
+class CollectionInfo(BaseModel):
+    name: str                 # Name of the collection
+    documents: int            # Number of documents in the collection
+    dim: int                  # Embedding dimension
+    model: str                # Name of the embedding model used
+    columns: Dict[str, ColumnInfo] # Details about indexed/non-indexed columns
+```
+*   **Purpose:** Provides details about a specific collection. (Note: Adjusted based on Chapter 1 example output for more realism).
+*   **Fields:** `name`, `documents`, `dim` (vector dimension), `model` name, and `columns` (dictionary mapping column names to their indexing status).
+*   **Example Validation:**
+  ```python
+  # Assume raw_data = {
+  #    "name": "papers", "documents": 1500, "dim": 768, "model": "all-MiniLM-L6-v2",
+  #    "columns": {"title": {"indexed": False}, "abstract": {"indexed": True}}
+  # }
+  # In LetsearchClient.get_collection():
+  coll_info = CollectionInfo.model_validate(raw_data)
+  print(coll_info.name) # Output: papers
+  print(coll_info.columns['abstract'].indexed) # Output: True
+  ```
+
+### 4. `CollectionsResponse`
+
+The expected response from the `get_collections()` method.
+
+```python
+# letsearch_client/types.py
+from typing import List
+
+class CollectionsResponse(BaseModel):
+    collections: List[CollectionInfo] # A list of CollectionInfo objects
+```
+*   **Purpose:** Contains a list of all available collections.
+*   **Fields:**
+    *   `collections`: A list where each item is a validated `CollectionInfo` instance.
+*   **Example Validation:**
+  ```python
+  # Assume raw_data = {
+  #    "collections": [
+  #      {"name": "papers", "documents": 1500, ... }, # Full CollectionInfo structure
+  #      {"name": "internal_docs", "documents": 250, ... }
+  #    ]
+  # }
+  # In LetsearchClient.get_collections():
+  collections_resp = CollectionsResponse.model_validate(raw_data)
+  print(len(collections_resp.collections)) # Output: 2
+  print(collections_resp.collections[0].name) # Output: papers
+  ```
+
+### 5. `SearchResult`
+
+Represents a single hit within a search response.
+
+```python
+# letsearch_client/types.py
+class SearchResult(BaseModel):
+    id: int | str # Document ID (can be int or string depending on source)
+    score: float   # Relevance score
+    content: str   # The content of the matching document/field
+    # Potentially other metadata fields depending on API response
+```
+*   **Purpose:** Encapsulates information about a single search result. (Adjusted `id` type and renamed `key` to `id` based on common usage and Chapter 1 example).
+*   **Fields:**
+    *   `id`: The unique identifier of the found document.
+    *   `score`: The similarity score between the query and the result.
+    *   `content`: The text content associated with the hit.
+
+### 6. `SearchResponse`
+
+The expected response from the `search()` method.
+
+```python
+# letsearch_client/types.py
+from typing import List
+
+class SearchResponse(BaseModel):
+    hits: List[SearchResult] # List of search results
+    took_ms: float           # Time taken for the search on the server (in milliseconds)
+```
+*   **Purpose:** Contains the list of search results and timing information. (Renamed `results` to `hits` and added `took_ms` based on common search API patterns and Chapter 1 example).
+*   **Fields:**
+    *   `hits`: A list where each item is a validated `SearchResult` instance.
+    *   `took_ms`: How long the search took on the server side.
+*   **Example Validation:**
+  ```python
+  # Assume raw_data = {
+  #  "hits": [
+  #      {"id": "doc_123", "score": 0.8912, "content": "The Attention Is All You Need..."},
+  #      {"id": "doc_456", "score": 0.8555, "content": "Exploring variations..."}
+  #  ],
+  #  "took_ms": 45.67
+  # }
+  # In LetsearchClient.search():
+  search_resp = SearchResponse.model_validate(raw_data)
+  print(f"Search took {search_resp.took_ms}ms") # Output: Search took 45.67ms
+  print(search_resp.hits[0].id)                 # Output: doc_123
+  print(search_resp.hits[0].score)              # Output: 0.8912
+  ```
+
+## How `LetsearchClient` Uses Pydantic Models
+
+As shown in the examples above and in [Chapter 1: LetsearchClient](letsearchclient.mdc), the client methods typically follow this pattern after receiving a successful raw JSON response (as a dictionary `res`) from the internal `_request` method:
+
+1.  **Call `model_validate`:** The specific Pydantic model corresponding to the expected response (e.g., `SearchResponse`) is used to validate and parse the dictionary: `result = SearchResponse.model_validate(res)`.
+2.  **Handle Validation Errors:** If the data from the API doesn't match the model structure (e.g., missing field, wrong type), Pydantic raises a `ValidationError`. This would typically propagate up, signaling an issue with the API response or an outdated client model definition.
+3.  **Return Validated Instance:** If validation succeeds, the method returns the populated Pydantic model instance (`result`).
+
+This ensures that the data returned by `LetsearchClient` methods is always structured, type-safe, and conforms to the expected API contract.
+
+**Simplified Data Flow with Validation:**
+
+```mermaid
+sequenceDiagram
+    participant UserApp as Python Application
+    participant ClientMethod as LetsearchClient Method (e.g., search)
+    participant Request as _request()
+    participant Pydantic as Pydantic Model (e.g., SearchResponse)
+    participant Server as Letsearch API
+
+    UserApp->>+ClientMethod: Call method (e.g., search())
+    ClientMethod->>+Request: Call _request()
+    Request->>+Server: Send HTTP Request
+    Server-->>-Request: Receive HTTP Response (JSON)
+    Request-->>+ClientMethod: Return Raw Dictionary `res`
+    ClientMethod->>+Pydantic: Call Pydantic.model_validate(res)
+    Pydantic-->>-ClientMethod: Return Validated Pydantic Instance `result`
+    ClientMethod-->>-UserApp: Return `result`
+```
+
+## Conclusion
+
+You've now learned about the crucial role of Pydantic models in `letsearch-client`. They act as Data Transfer Objects (DTOs), defining the expected structure and types for data exchanged with the Letsearch API. By automatically validating API responses (`HealthcheckResponse`, `CollectionsResponse`, `SearchResponse`, etc.), they enforce the API contract, prevent runtime errors caused by unexpected data, improve code clarity, and enable helpful IDE features like autocompletion. Using these models makes interacting with the Letsearch API more robust and predictable.
+
+**Next:** We will explore the internal mechanism that handles the actual HTTP communication and initial response processing: [HTTP Request Abstraction (`_request`)](http_request_abstraction____request__.mdc).
+
+
+---
+
+Generated by [Rules for AI](https://github.com/altaidevorg/rules-for-ai)

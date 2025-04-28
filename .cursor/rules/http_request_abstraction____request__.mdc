@@ -1,0 +1,212 @@
+---
+description: Explains the internal `_request` helper method in letsearch-client, which handles HTTP requests and error logic.
+globs: 
+alwaysApply: false
+---
+# Chapter 3: HTTP Request Abstraction (`_request`)
+
+In [Chapter 2: API Data Models (Pydantic Types)](api_data_models__pydantic_types_.mdc), we saw how Pydantic models validate the structure of data returned by `LetsearchClient` methods. Now, we'll look under the hood at the mechanism responsible for fetching that raw data from the Letsearch API: the internal `_request` helper method.
+
+## Motivation: Centralizing HTTP Interactions
+
+**Problem:** Directly using an HTTP client library like `httpx` within every public method of `LetsearchClient` (`healthcheck`, `search`, `get_collections`, etc.) would lead to significant code duplication. Common tasks like constructing URLs, sending requests (GET/POST), handling JSON bodies, checking response status codes, parsing JSON responses, and implementing consistent error handling logic would be repeated across multiple methods. This violates the DRY (Don't Repeat Yourself) principle, making the code harder to maintain, test, and update.
+
+**Solution:** The `_request` method acts as a **private helper** or **internal utility function** within the `LetsearchClient` class. It encapsulates all the common logic for interacting with the Letsearch API endpoints via HTTP. Public methods delegate the actual network communication and initial response processing to `_request`, keeping their own logic focused on preparing inputs and validating outputs using the Pydantic models discussed previously.
+
+**Central Use Case:** Consider the `client.search()` method. It needs to send a POST request to `/collections/{collection_name}/search` with a JSON body containing the query details. Instead of handling the `httpx.post` call, potential `httpx.HTTPStatusError`, and JSON parsing itself, it simply calls `self._request(...)`, passing the necessary endpoint, method ('post'), and body. The `_request` method handles the complexities, returning either the parsed data dictionary on success or an `ErrorResponse` object (or raising an exception) on failure, based on the client's configuration.
+
+## Key Concepts of `_request`
+
+The `_request` method centralizes several key aspects of API communication:
+
+1.  **Unified Request Execution:** It handles both GET and POST requests based on the `method` parameter, using the shared `httpx.Client` instance (`self.client`) configured during `LetsearchClient` initialization ([Chapter 1: LetsearchClient](letsearchclient.mdc)).
+2.  **JSON Body Handling:** For POST requests, it takes a Python dictionary (`body`) and automatically serializes it as the JSON payload for the request.
+3.  **Success Response Parsing:** It assumes successful API responses (HTTP 2xx) will contain a JSON body with a top-level `data` key, and it extracts and returns the dictionary nested under this key.
+4.  **Configurable Error Handling:** This is a crucial feature. Based on the `self.raise_for_status` boolean flag (set during `LetsearchClient` initialization):
+    *   If `True`: It leverages `httpx`'s `response.raise_for_status()` method. If the API returns an HTTP error status (4xx or 5xx), an `httpx.HTTPStatusError` is raised immediately, interrupting the flow and propagating the error upwards.
+    *   If `False`: It catches the `httpx.HTTPStatusError`, attempts to parse the error response body (expecting a `message` key in the JSON), and returns a structured `ErrorResponse` object ([Chapter 2: API Data Models (Pydantic Types)](api_data_models__pydantic_types_.mdc)).
+
+## How Public Methods Use `_request`
+
+The public methods of `LetsearchClient` act as clients to the internal `_request` method. They prepare the specific endpoint, method, and body (if needed) and then delegate the call.
+
+**Example 1: `healthcheck()`**
+
+```python
+# In LetsearchClient class:
+def healthcheck(self) -> HealthcheckResponse | ErrorResponse:
+    # Calls _request for the root endpoint using GET
+    res = self._request("/", "get")
+    # Checks if _request returned an error or data
+    if isinstance(res, ErrorResponse):
+        return res # Return error directly if raise_for_status=False
+    else:
+        # Parse successful data dict using Pydantic model
+        return HealthcheckResponse(version=res["version"], status=res["status"])
+```
+*   `_request` is called with `endpoint="/"` and `method="get"`.
+*   The returned `res` is either the dictionary from `data` or an `ErrorResponse`.
+*   `healthcheck` handles the Pydantic validation only if `res` is a dictionary.
+
+**Example 2: `search()`**
+
+```python
+# In LetsearchClient class:
+def search(
+    self, collection_name: str, column_name: str, query: str, limit=10
+) -> SearchResponse | ErrorResponse:
+    # Prepare the request body
+    body = {"column_name": column_name, "query": query, "limit": limit}
+    # Construct endpoint dynamically
+    endpoint = f"/collections/{collection_name}/search"
+    # Call _request with endpoint, method='post', and body
+    res = self._request(endpoint, "post", body=body)
+    # Check return type from _request
+    if isinstance(res, ErrorResponse):
+        return res # Return error directly if raise_for_status=False
+    else:
+        # Parse successful data dict using Pydantic model
+        result = SearchResponse.model_validate(res)
+        return result
+```
+*   `_request` is called with the specific search endpoint, `method="post"`, and the constructed `body` dictionary.
+*   Again, the calling method handles the Pydantic validation based on the type returned by `_request`.
+
+## Internal Implementation Deep Dive
+
+Let's trace the execution flow when a public method calls `_request`.
+
+**Step-by-Step Flow (e.g., for `search` when `raise_for_status=True`):**
+
+1.  `search()` determines the `endpoint`, `method` ('post'), and `body`.
+2.  `search()` calls `self._request(endpoint, "post", body)`.
+3.  `_request()` enters the `try` block.
+4.  It executes `self.client.post(endpoint, json=body)` using the shared `httpx.Client`.
+5.  `httpx` sends the POST request to the Letsearch API server.
+6.  The server processes the request and sends back a response (e.g., HTTP 200 OK with JSON `{"data": {...}}`, or HTTP 404 Not Found with JSON `{"message": "Collection not found"}`).
+7.  `_request()` receives the `httpx.Response` object (`res`).
+8.  It checks `self.raise_for_status` (which is `True` in this case).
+9.  It calls `res.raise_for_status()`.
+    *   If the status was 2xx (e.g., 200 OK), this does nothing.
+    *   If the status was 4xx or 5xx (e.g., 404 Not Found), this raises an `httpx.HTTPStatusError`.
+10. **Success Path:** If no error was raised, it proceeds to `res.json()["data"]`.
+    *   `res.json()` parses the response body into a Python dictionary (e.g., `{"data": {"hits": [...], "took_ms": ...}}`).
+    *   `["data"]` accesses the value associated with the "data" key.
+    *   This dictionary (e.g., `{"hits": [...], "took_ms": ...}`) is returned to the `search()` method.
+11. **Error Path:** If `raise_for_status()` raised an `httpx.HTTPStatusError`:
+    *   Execution jumps to the `except httpx.HTTPStatusError as e:` block.
+    *   It checks `self.raise_for_status` again (still `True`).
+    *   It executes `raise e`, re-raising the caught exception.
+    *   The exception propagates out of `_request` and `search`, to be potentially handled by the user's code.
+
+**Sequence Diagram (`_request` interaction):**
+
+```mermaid
+sequenceDiagram
+    participant PublicMethod as LetsearchClient Method (e.g., search)
+    participant Request as _request()
+    participant HTTPX as httpx.Client
+    participant Server as Letsearch API
+
+    PublicMethod->>+Request: _request(endpoint, method, body)
+    Request->>+HTTPX: method(endpoint, json=body) # e.g., post()
+    HTTPX->>+Server: HTTP Request (e.g., POST /...)
+    alt Success (e.g., 200 OK {"data": ...})
+        Server-->>-HTTPX: HTTP 200 OK, JSON Body
+        HTTPX-->>Request: Response (status=200, json={"data": ...})
+        alt raise_for_status = True
+           Request->>Request: raise_for_status() # No error
+        else raise_for_status = False
+           Request->>Request: # Skip raise_for_status() check implicitly
+        end
+        Request->>Request: Parse JSON, extract data["data"]
+        Request-->>-PublicMethod: Return dict (data)
+    else Failure (e.g., 404 Not Found {"message": ...})
+        Server-->>-HTTPX: HTTP 404 Not Found, JSON Body
+        HTTPX-->>Request: Response (status=404, json={"message": ...})
+        alt raise_for_status = True
+            Request->>Request: raise_for_status() # Raises HTTPStatusError
+            Request->>Request: Catch HTTPStatusError
+            Request->>Request: Re-raise HTTPStatusError
+            Request-->>-PublicMethod: Raise HTTPStatusError
+        else raise_for_status = False
+            Request->>Request: raise_for_status() check implicitly skipped/passed
+            Request->>Request: # Normal flow might fail accessing ["data"]
+            Note over Request: Initial code assumed raise_for_status() was the only error source
+            Request->>Request: Catch HTTPStatusError (Adjusted Flow)
+            Request->>Request: Parse error response: e.response.json()
+            Request->>Request: Create ErrorResponse(message=...)
+            Request-->>-PublicMethod: Return ErrorResponse instance
+        end
+    end
+```
+*(Note: The diagram and explanation illustrate both paths controlled by `raise_for_status`)*
+
+**Core Code Snippet (`_request` method):**
+
+```python
+# letsearch_client/letsearch_client.py
+import httpx
+from .types import ErrorResponse
+from typing import Dict
+
+class LetsearchClient:
+    # ... __init__, __enter__, __exit__, close ...
+
+    def _request(
+        self, endpoint: str, method: str | None = None, body: Dict | None = None
+    ) -> Dict | ErrorResponse:
+        """ Internal method to send HTTP requests. ... """
+        try:
+            # Determine GET or POST based on method
+            res = (
+                self.client.get(endpoint)
+                if method == "get"
+                else self.client.post(endpoint, json=body)
+            )
+
+            # Option 1: Raise exception immediately on 4xx/5xx if configured
+            if self.raise_for_status:
+                res.raise_for_status()
+
+            # If successful (or raise_for_status=False and status is 2xx),
+            # parse JSON and return the content under the 'data' key.
+            return res.json()["data"]
+
+        except httpx.HTTPStatusError as e:
+            # Option 2: Handle HTTPStatusError if raise_for_status is True
+            if self.raise_for_status:
+                raise e # Re-raise the original exception
+
+            # Option 3: Handle HTTPStatusError if raise_for_status is False
+            try:
+                # Attempt to parse the error message from the response body
+                error_data = e.response.json()
+                return ErrorResponse(message=error_data.get("message", "Unknown API error"))
+            except Exception: # Catch potential JSON parsing errors
+                # Fallback if error response isn't valid JSON or lacks 'message'
+                return ErrorResponse(message=f"HTTP Error: {e.response.status_code} - {e.response.text}")
+
+        except Exception as e: # Catch other potential errors (network, JSON parsing on success)
+            # Fallback for non-HTTP errors or unexpected issues
+            if self.raise_for_status:
+               raise e # Or wrap in a custom client error
+            else:
+               return ErrorResponse(message=f"Client-side error: {str(e)}")
+```
+*   The `try` block contains the core request logic using `self.client`.
+*   The first `if self.raise_for_status:` controls whether `httpx` automatically raises errors for bad statuses.
+*   The `return res.json()["data"]` assumes a successful response format.
+*   The `except httpx.HTTPStatusError` block implements the branching logic for error handling based on `self.raise_for_status`.
+*   Additional `except` blocks handle potential non-HTTP errors or unexpected JSON structures.
+
+## Conclusion
+
+The `_request` method is a vital internal component of the `LetsearchClient`. By centralizing HTTP request execution, response parsing, and error handling logic, it significantly simplifies the implementation of the public API methods (`healthcheck`, `search`, etc.). It encapsulates the direct interaction with the `httpx` library and provides a consistent way to manage API communication success and failure scenarios, respecting the `raise_for_status` configuration flag. Understanding `_request` is key to grasping how the `LetsearchClient` interacts with the network and handles potential API errors.
+
+**Next:** We shift focus from API interaction to a utility potentially used alongside the client or server: the [ONNX Model Exporter](onnx_model_exporter.mdc), which deals with preparing machine learning models.
+
+
+---
+
+Generated by [Rules for AI](https://github.com/altaidevorg/rules-for-ai)

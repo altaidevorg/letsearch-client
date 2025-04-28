@@ -1,0 +1,350 @@
+---
+description: Explains the LetsearchClient class in letsearch-client, the main interface for interacting with the Letsearch REST API.
+globs: letsearch_client/letsearch_client.py
+alwaysApply: true
+---
+# Chapter 1: LetsearchClient
+
+Welcome to the `letsearch-client` library tutorial. This first chapter introduces the `LetsearchClient`, the cornerstone for interacting with a remote Letsearch server instance from your Python applications.
+
+## Motivation and Use Case
+
+**Problem:** Interacting with a REST API involves handling HTTP requests (GET, POST, etc.), managing URLs, serializing request bodies, parsing JSON responses, handling potential network or server errors, and managing HTTP client resources. Doing this manually for every API call is repetitive, error-prone, and couples application logic tightly with HTTP communication details.
+
+**Solution:** The `LetsearchClient` acts as a **Facade** pattern implementation. It provides a simplified, high-level Python interface that encapsulates all the complexities of communicating with the Letsearch REST API. Instead of manually crafting HTTP requests, you call intuitive Python methods like `search()` or `get_collections()`. It leverages the robust `httpx` library for the underlying HTTP communication.
+
+**Central Use Case:** Imagine you are building a Python service that needs to:
+1.  Verify if the Letsearch server is running and responsive.
+2.  Discover which document collections are available for searching.
+3.  Perform a semantic search within a specific collection (e.g., find documents related to "machine learning performance").
+
+The `LetsearchClient` is designed precisely for such tasks, making the integration seamless.
+
+## Using `LetsearchClient`
+
+### Instantiation
+
+To begin interacting with the Letsearch API, you first create an instance of `LetsearchClient`.
+
+```python
+# letsearch_client/letsearch_client.py
+import httpx
+
+DEFAULT_BASE_URL = "http://localhost:7898"
+
+class LetsearchClient:
+    def __init__(
+        self,
+        letsearch_url: str = DEFAULT_BASE_URL, # Default server URL
+        timeout: int | None = None,          # Optional request timeout
+        raise_for_status: bool = True,       # Raise exception on HTTP errors (4xx, 5xx)
+    ):
+        self.base_url = letsearch_url.rstrip("/") if isinstance(letsearch_url, str) else DEFAULT_BASE_URL
+        # Initialize the underlying httpx client
+        self.client = httpx.Client(base_url=self.base_url, timeout=timeout)
+        self.raise_for_status = raise_for_status
+    # ... other methods ...
+```
+
+*   `letsearch_url`: The base URL of your Letsearch server instance. Defaults to `http://localhost:7898`.
+*   `timeout`: An optional integer specifying the request timeout in seconds. Defaults to `None` (no timeout, relies on `httpx` defaults).
+*   `raise_for_status`: If `True` (default), an `httpx.HTTPStatusError` will be raised for responses with status codes 4xx or 5xx. If `False`, errors are returned as `ErrorResponse` objects.
+
+**Example Instantiation:**
+
+```python
+from letsearch_client import LetsearchClient
+
+# Connect to the default server
+client_default = LetsearchClient()
+
+# Connect to a specific server with a 10-second timeout
+client_custom = LetsearchClient(letsearch_url="http://192.168.1.100:7898", timeout=10)
+
+# Connect and handle HTTP errors manually
+client_no_raise = LetsearchClient(raise_for_status=False)
+```
+These examples demonstrate creating client instances configured for different scenarios.
+
+### Context Management
+
+`LetsearchClient` implements the context manager protocol (`__enter__` and `__exit__`). This is the recommended way to use the client, as it ensures the underlying `httpx.Client` is properly closed, releasing network resources.
+
+```python
+# letsearch_client/letsearch_client.py
+class LetsearchClient:
+    # ... __init__ ...
+
+    def __enter__(self):
+        return self # Returns the client instance
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self.close() # Ensures close() is called automatically
+
+    def close(self) -> None:
+        self.client.close() # Closes the httpx client
+
+    # ... other methods ...
+```
+
+**Example Usage with `with`:**
+
+```python
+from letsearch_client import LetsearchClient
+
+# Use the client within a 'with' block
+with LetsearchClient() as client:
+    # Use client methods here
+    health_status = client.healthcheck()
+    print(health_status)
+    # ... other operations ...
+
+# Outside the 'with' block, client.close() has been called automatically.
+```
+Using the `with` statement guarantees that `client.close()` is invoked, even if errors occur within the block. You can also call `client.close()` manually if not using a `with` block, but the context manager approach is preferred.
+
+### Core API Methods
+
+Let's fulfill our use case using the client's methods. These methods correspond directly to Letsearch API endpoints. The responses are typically Pydantic models, which are detailed in the [API Data Models (Pydantic Types)](api_data_models__pydantic_types_.mdc) chapter.
+
+1.  **Check Server Health (`healthcheck`)**
+
+    ```python
+    # letsearch_client/letsearch_client.py
+    from .types import HealthcheckResponse, ErrorResponse
+
+    class LetsearchClient:
+        # ... other methods ...
+        def healthcheck(self) -> HealthcheckResponse | ErrorResponse:
+            res = self._request("/", "get") # Calls internal _request method
+            if isinstance(res, ErrorResponse):
+                return res
+            else:
+                # Parse successful response into HealthcheckResponse
+                return HealthcheckResponse(version=res["version"], status=res["status"])
+    ```
+    This method sends a GET request to the server's root endpoint (`/`).
+
+    **Example:**
+    ```python
+    with LetsearchClient() as client:
+        try:
+            health = client.healthcheck()
+            if isinstance(health, HealthcheckResponse):
+                print(f"Server Status: {health.status}, Version: {health.version}")
+            else: # Only if raise_for_status=False
+                 print(f"Error checking health: {health.message}")
+        except httpx.HTTPStatusError as e:
+            print(f"HTTP Error checking health: {e.response.status_code} - {e.response.text}")
+
+    # Example Output (Success):
+    # Server Status: ok, Version: 0.1.0
+    ```
+
+2.  **List Collections (`get_collections`)**
+
+    ```python
+    # letsearch_client/letsearch_client.py
+    from .types import CollectionsResponse
+
+    class LetsearchClient:
+        # ... other methods ...
+        def get_collections(self) -> CollectionsResponse | ErrorResponse:
+            res = self._request("/collections", "get") # GET /collections
+            if isinstance(res, ErrorResponse):
+                return res
+            else:
+                # Validate and parse response into CollectionsResponse
+                result = CollectionsResponse.model_validate(res)
+                return result
+    ```
+    Retrieves a list of all available collections on the server via a GET request to `/collections`.
+
+    **Example:**
+    ```python
+    with LetsearchClient() as client:
+        try:
+            collections_response = client.get_collections()
+            if isinstance(collections_response, CollectionsResponse):
+               print("Available Collections:")
+               for coll_info in collections_response.collections:
+                   print(f"- {coll_info.name} ({coll_info.documents} docs, Dim: {coll_info.dim})")
+            else: # Only if raise_for_status=False
+                 print(f"Error getting collections: {collections_response.message}")
+        except httpx.HTTPStatusError as e:
+            print(f"HTTP Error getting collections: {e.response.status_code}")
+
+    # Example Output:
+    # Available Collections:
+    # - papers (1500 docs, Dim: 768)
+    # - internal_docs (250 docs, Dim: 384)
+    ```
+
+3.  **Get Specific Collection Details (`get_collection`)**
+
+    ```python
+    # letsearch_client/letsearch_client.py
+    from .types import CollectionInfo
+
+    class LetsearchClient:
+        # ... other methods ...
+        def get_collection(self, collection_name: str) -> CollectionInfo | ErrorResponse:
+            # GET /collections/{collection_name}
+            res = self._request(f"/collections/{collection_name}", "get")
+            if isinstance(res, ErrorResponse):
+                return res
+            else:
+                # Validate and parse response into CollectionInfo
+                result = CollectionInfo.model_validate(res)
+                return result
+    ```
+    Fetches details for a single collection using its name via a GET request to `/collections/{collection_name}`.
+
+    **Example:**
+    ```python
+    with LetsearchClient() as client:
+        try:
+            collection_info = client.get_collection("papers")
+            if isinstance(collection_info, CollectionInfo):
+                print(f"Details for 'papers': {collection_info}")
+            else: # Only if raise_for_status=False
+                 print(f"Error getting collection 'papers': {collection_info.message}")
+        except httpx.HTTPStatusError as e:
+            print(f"HTTP Error getting collection 'papers': {e.response.status_code}")
+
+    # Example Output:
+    # Details for 'papers': name='papers' documents=1500 dim=768 model='all-MiniLM-L6-v2' columns={'title': {'indexed': False}, 'abstract': {'indexed': True}}
+    ```
+
+
+4.  **Perform Search (`search`)**
+
+    ```python
+    # letsearch_client/letsearch_client.py
+    from .types import SearchResponse
+
+    class LetsearchClient:
+        # ... other methods ...
+        def search(
+            self, collection_name: str, column_name: str, query: str, limit=10
+        ) -> SearchResponse | ErrorResponse:
+            # POST /collections/{collection_name}/search
+            body = {"column_name": column_name, "query": query, "limit": limit}
+            res = self._request(f"/collections/{collection_name}/search", "post", body=body)
+            if isinstance(res, ErrorResponse):
+                return res
+            else:
+                # Validate and parse response into SearchResponse
+                result = SearchResponse.model_validate(res)
+                return result
+    ```
+    Executes a semantic search. This sends a POST request to `/collections/{collection_name}/search` with the query details in the request body.
+
+    **Example:**
+    ```python
+    with LetsearchClient() as client:
+        try:
+            search_results = client.search(
+                collection_name="papers",
+                column_name="abstract",
+                query="transformer model attention mechanism",
+                limit=5
+            )
+            if isinstance(search_results, SearchResponse):
+                print(f"Search took: {search_results.took_ms} ms")
+                for hit in search_results.hits:
+                    print(f"  Score: {hit.score:.4f}, ID: {hit.id}, Content: {hit.content[:50]}...") # Show snippet
+            else: # Only if raise_for_status=False
+                 print(f"Error during search: {search_results.message}")
+        except httpx.HTTPStatusError as e:
+            print(f"HTTP Error during search: {e.response.status_code} - {e.response.text}")
+
+    # Example Output:
+    # Search took: 45.67 ms
+    #   Score: 0.8912, ID: doc_123, Content: The Attention Is All You Need paper introduced the...
+    #   Score: 0.8555, ID: doc_456, Content: Exploring variations in the multi-head attention...
+    #   Score: 0.8321, ID: doc_789, Content: Efficient Transformers: A Survey covering methods...
+    #   ... (up to 5 results)
+    ```
+
+## Internal Implementation
+
+Understanding how `LetsearchClient` works internally helps in debugging and advanced usage.
+
+**High-Level Flow:**
+
+When you call a method like `client.search(...)`:
+1.  The `search` method constructs the API endpoint path (e.g., `/collections/papers/search`) and the JSON request body.
+2.  It calls the internal `_request` method, passing the endpoint, HTTP method (`post`), and body.
+3.  The `_request` method uses the `self.client` (an `httpx.Client` instance) to send the actual HTTP request to the `base_url` combined with the endpoint.
+4.  `httpx` handles the network communication, sending the request and receiving the response.
+5.  The `_request` method checks the response status. If `raise_for_status` is `True` and the status indicates an error (4xx, 5xx), it raises an `httpx.HTTPStatusError`.
+6.  If the request is successful (or `raise_for_status` is `False`), `_request` parses the JSON response body. It expects the Letsearch API to return JSON in the format `{"data": ...}` for successful requests or `{"message": ...}` for errors it handles internally. It extracts the content within the `"data"` key.
+7.  The original method (e.g., `search`) receives the parsed dictionary (`res`) from `_request`.
+8.  It uses Pydantic's `model_validate` method (e.g., `SearchResponse.model_validate(res)`) to parse and validate the dictionary into the corresponding response model ([API Data Models (Pydantic Types)](api_data_models__pydantic_types_.mdc)).
+9.  The validated Pydantic model instance is returned to the caller.
+
+**Sequence Diagram (for `search` call):**
+
+```mermaid
+sequenceDiagram
+    participant UserApp as Python Application
+    participant Client as LetsearchClient
+    participant Request as _request()
+    participant HTTPX as httpx.Client
+    participant Server as Letsearch API
+
+    UserApp->>+Client: search("papers", "abstract", "query", 5)
+    Client->>+Request: _request("/collections/papers/search", "post", body={...})
+    Request->>+HTTPX: post("/collections/papers/search", json={...})
+    HTTPX->>+Server: POST /collections/papers/search HTTP/1.1 ...
+    Server-->>-HTTPX: HTTP/1.1 200 OK ... {"data": {...}}
+    HTTPX-->>-Request: Response(status=200, json={"data": {...}})
+    Request-->>Client: dict (parsed data)
+    Client->>Client: SearchResponse.model_validate(dict)
+    Client-->>-UserApp: SearchResponse instance
+```
+
+**Core Components:**
+
+*   **`httpx.Client`:** Stored in `self.client`, this object manages the underlying HTTP connection pool and performs the actual requests. It's configured with the `base_url` and `timeout` during `LetsearchClient` initialization.
+*   **`_request` Method:** This private helper method standardizes how requests are made and responses are initially processed (JSON parsing, basic error checking). It centralizes the interaction with `self.client`. More details can be found in [HTTP Request Abstraction (`_request`)](http_request_abstraction____request__.mdc).
+  ```python
+  # letsearch_client/letsearch_client.py
+  def _request(
+      self, endpoint: str, method: str | None = None, body: Dict | None = None
+  ) -> Dict | ErrorResponse:
+      try:
+          # Use httpx client for GET or POST
+          res = (
+              self.client.get(endpoint)
+              if method == "get"
+              else self.client.post(endpoint, json=body)
+          )
+          # Optional: Raise exception for 4xx/5xx errors
+          if self.raise_for_status:
+              res.raise_for_status()
+          # Expect {"data": ...} on success
+          return res.json()["data"]
+      except httpx.HTTPStatusError as e:
+          if self.raise_for_status:
+              raise e # Re-raise if configured
+          # Try to parse error message if not raising
+          res = e.response.json()
+          return ErrorResponse(message=res["message"])
+      # ... (Other exception handling omitted for brevity)
+  ```
+*   **Context Management (`__enter__`, `__exit__`, `close`):** These methods ensure the `httpx.Client` (`self.client`) is properly closed via `self.client.close()` when the `with` block exits or `close()` is called manually, preventing resource leaks.
+
+## Conclusion
+
+You now understand the `LetsearchClient`, the primary tool for interacting with the Letsearch API from Python. It acts as a Facade, simplifying HTTP communication by providing intuitive methods (`healthcheck`, `get_collections`, `search`, etc.) that map to API endpoints. You learned how to instantiate the client, use it with context management for safe resource handling, and invoke its core methods to perform common Letsearch operations. We also briefly looked under the hood at how it uses `httpx` and the `_request` helper.
+
+The data returned by `LetsearchClient` methods (like `HealthcheckResponse`, `CollectionsResponse`, `SearchResponse`) are structured using Pydantic models. Understanding these models is crucial for effectively processing the API responses.
+
+**Next:** Let's dive into the specific data structures used for requests and responses in [API Data Models (Pydantic Types)](api_data_models__pydantic_types_.mdc).
+
+
+---
+
+Generated by [Rules for AI](https://github.com/altaidevorg/rules-for-ai)
